@@ -10,44 +10,47 @@ import streamlit as st
 # Load Data
 @st.cache_data
 def load_data():
-    iip_data = pd.read_excel('IIP2024.xlsx')  # Existing IIP Data
+    iip_data = pd.read_excel('IIP2024.xlsx')
     stock_data = {}
     stock_data_folder = 'stockdata'
     for filename in os.listdir(stock_data_folder):
         if filename.endswith('.csv'):
             stock_name = filename.replace('.csv', '')
             stock_data[stock_name] = pd.read_csv(os.path.join(stock_data_folder, filename))
-    correlation_results = pd.read_excel(os.path.join(stock_data_folder, 'Manufacture_of_Food_Products_correlation_results.xlsx'))  # Correlation data
+    
+    # Load correlation results
+    correlation_results = pd.read_excel(os.path.join(stock_data_folder, 'Manufacture_of_Food_Products_correlation_results.xlsx'))
+    
+    # Load financial data
     financial_data = {}
     financial_folder = 'financial'
     for filename in os.listdir(financial_folder):
         if filename.endswith('.xlsx'):
             stock_name = filename.replace('.xlsx', '')
-            financial_data[stock_name] = pd.read_excel(os.path.join(financial_folder, filename), sheet_name=None)
+            stock_file_path = os.path.join(financial_folder, filename)
+            financial_data[stock_name] = pd.read_excel(stock_file_path, sheet_name=None)
+    
     return iip_data, stock_data, correlation_results, financial_data
 
 iip_data, stock_data, correlation_results, financial_data = load_data()
 
-# Sidebar for selecting between manual input or file upload
-data_input_method = st.sidebar.radio("Choose Data Input Method:", ("Manual Input", "Upload Synthetic Data"))
-
-if data_input_method == "Upload Synthetic Data":
-    # File Upload for Synthetic Data
-    uploaded_file = st.sidebar.file_uploader("Upload Synthetic Data", type="xlsx")
-    if uploaded_file:
-        synthetic_data = pd.read_excel(uploaded_file, sheet_name=None)
-else:
-    # Manual Input
-    synthetic_data = None
-
-# Define Industry and Indicators (Existing structure)
+# Define Industry and Indicators
 indicators = {
     'Manufacture of Food Products': {
         'Leading': ['Consumer Spending Trends', 'Agricultural Output', 'Retail Sales Data'],
         'Lagging': ['Inventory Levels', 'Employment Data']
     }
-    # You can add more industries here
 }
+
+# Sidebar for selecting between manual input or file upload
+st.sidebar.header("Input Options")
+data_input_method = st.sidebar.radio("Choose Data Input Method:", ("Manual Input", "Upload Excel with Leading Indicator Data"))
+
+# Upload Excel File for Leading Indicators (May-24 and Jun-24 data)
+if data_input_method == "Upload Excel with Leading Indicator Data":
+    uploaded_file = st.sidebar.file_uploader("Upload Excel file with Expected Consumer Spending, Agricultural Output, and Retail Sales Data", type="xlsx")
+    if uploaded_file:
+        uploaded_data = pd.read_excel(uploaded_file)
 
 # Select Industry from Sidebar
 selected_industry = st.sidebar.selectbox(
@@ -56,148 +59,106 @@ selected_industry = st.sidebar.selectbox(
     index=0  # Default selection
 )
 
+# Prepare Data for Modeling based on selected industry
 if selected_industry:
-    # Normalize and match industry names between uploaded file and the indicators
-    normalized_industry = selected_industry.strip().lower()
-    matched_sheet_name = None
-    
-    if synthetic_data:
-        for sheet_name in synthetic_data.keys():
-            if sheet_name.strip().lower() == normalized_industry:
-                matched_sheet_name = sheet_name
-                break
-    
     st.header(f'Industry: {selected_industry}')
     
-    if matched_sheet_name and synthetic_data:
-        # Use uploaded synthetic data
-        def prepare_data(industry, data, iip_data):
-            leading_indicators = indicators[industry]['Leading']
-            X = data[leading_indicators].shift(1).dropna()
-            y = iip_data[industry].loc[X.index]
-            return X, y
+    # Check if data is uploaded or manual input
+    if data_input_method == "Upload Excel with Leading Indicator Data" and uploaded_file:
+        if 'Date' in uploaded_data.columns and all(col in uploaded_data.columns for col in indicators[selected_industry]['Leading']):
+            # Use uploaded data for predictions (May-24, Jun-24)
+            X = uploaded_data[indicators[selected_industry]['Leading']].dropna()
+            st.write("**Uploaded Leading Indicator Data**")
+            st.write(uploaded_data)
 
-        X, y = prepare_data(selected_industry, synthetic_data[matched_sheet_name], iip_data)
-        
+            y = iip_data[selected_industry].iloc[:len(X)]  # Match the length of X with the iip_data
+        else:
+            st.error("Uploaded file does not have the required columns or Date field.")
+            X = None
+            y = None
     else:
-        # Use manual input for data
+        # Manual Input for the data
+        st.subheader("Manual Input for Leading Indicators")
         input_data = {}
         for indicator in indicators[selected_industry]['Leading']:
             input_data[indicator] = st.number_input(f'Expected {indicator} Value:', value=100.0)
-        input_df = pd.DataFrame(input_data, index=[0])
-        X = input_df  # Manually entered input data for prediction
+        
+        X = pd.DataFrame(input_data, index=[0])
         y = pd.Series([100.0])  # Placeholder for industry data
+    
+    if X is not None and y is not None:
+        # Train models
+        reg_model = LinearRegression()
+        reg_model.fit(X, y)
+        reg_pred = reg_model.predict(X)
 
-    # Train models
-    reg_model = LinearRegression()
-    reg_model.fit(X, y)
-    reg_pred = reg_model.predict(X)
+        arima_model = ARIMA(y, order=(5, 1, 0))
+        arima_result = arima_model.fit()
+        arima_pred = arima_result.predict(start=1, end=len(y), dynamic=False)
 
-    arima_model = ARIMA(y, order=(5, 1, 0))
-    arima_result = arima_model.fit()
-    arima_pred = arima_result.predict(start=1, end=len(y), dynamic=False)
-
-    rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
-    rf_model.fit(X, y)
-    rf_pred = rf_model.predict(X)
-
-    # Show predictions
-    st.subheader('Model Performance')
-    st.write(f"Linear Regression RMSE: {mean_squared_error(y, reg_pred, squared=False):.2f}")
-    st.write(f"ARIMA RMSE: {mean_squared_error(y, arima_pred, squared=False):.2f}")
-    st.write(f"Random Forest RMSE: {mean_squared_error(y, rf_pred, squared=False):.2f}")
+        rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
+        rf_model.fit(X, y)
+        rf_pred = rf_model.predict(X)
 
         # Visualize Predictions
-    fig.update_layout(
-        title=f'Industry Data Prediction for {selected_industry}',
-        xaxis_title='Date',
-        yaxis_title='Industry Data',
-        hovermode='x unified'
-    )
+        st.subheader('Model Performance')
+        st.write(f"Linear Regression RMSE: {mean_squared_error(y, reg_pred, squared=False):.2f}")
+        st.write(f"ARIMA RMSE: {mean_squared_error(y, arima_pred, squared=False):.2f}")
+        st.write(f"Random Forest RMSE: {mean_squared_error(y, rf_pred, squared=False):.2f}")
 
-    st.plotly_chart(fig, use_container_width=True)
+        # Visualization
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=y.index, y=y, mode='lines', name='Actual Industry Data'))
+        fig.add_trace(go.Scatter(x=y.index, y=reg_pred, mode='lines', name='Linear Regression Prediction'))
+        fig.add_trace(go.Scatter(x=y.index, y=arima_pred, mode='lines', name='ARIMA Prediction'))
+        fig.add_trace(go.Scatter(x=y.index, y=rf_pred, mode='lines', name='Random Forest Prediction'))
 
-    # Predict Future Values based on manual input or uploaded data
-    st.subheader('Predict Future Values')
+        fig.update_layout(
+            title=f'Industry Data Prediction for {selected_industry}',
+            xaxis_title='Date',
+            yaxis_title='Industry Data',
+            hovermode='x unified'
+        )
 
-    if data_input_method == "Manual Input":
-        input_data = {}
-        for indicator in indicators[selected_industry]['Leading']:
-            input_data[indicator] = st.number_input(f'Expected {indicator} Value:', value=float(X[indicator].iloc[-1]) if not X.empty else 100.0)
-        input_df = pd.DataFrame(input_data, index=[0])
-    else:
-        # If synthetic data is uploaded
-        input_df = pd.DataFrame({
-            indicator: synthetic_data[matched_sheet_name][indicator].iloc[-1] for indicator in indicators[selected_industry]['Leading']
-        }, index=[0])
+        st.plotly_chart(fig, use_container_width=True)
 
-    # Predict future values using models
-    future_reg_pred = reg_model.predict(input_df)
-    future_rf_pred = rf_model.predict(input_df)
+        # Predict Future Values
+        st.subheader('Predict Future Values')
 
-    st.write(f"Linear Regression Prediction: {future_reg_pred[0]:.2f}")
-    st.write(f"Random Forest Prediction: {future_rf_pred[0]:.2f}")
+        if data_input_method == "Manual Input":
+            input_data = {indicator: st.number_input(f'Expected {indicator} Value:', value=float(X[indicator].iloc[-1]) if not X.empty else 100.0) for indicator in indicators[selected_industry]['Leading']}
+            future_df = pd.DataFrame(input_data, index=[0])
+        else:
+            # Use uploaded data for prediction
+            future_df = pd.DataFrame(uploaded_data[indicators[selected_industry]['Leading']].iloc[-1:])
 
-    # Select stock for correlation and financial data analysis
-    st.sidebar.subheader('Stock Selection')
-    stock_name = st.sidebar.selectbox('Select Stock for Financial Data', list(financial_data.keys()), index=0)
+        # Predictions
+        future_reg_pred = reg_model.predict(future_df)
+        future_rf_pred = rf_model.predict(future_df)
 
-    # Get latest financial data for selected stock
-    if stock_name:
-        stock_financial_data = financial_data[stock_name].get('IncomeStatement', pd.DataFrame())
+        st.write(f"Linear Regression Prediction: {future_reg_pred[0]:.2f}")
+        st.write(f"Random Forest Prediction: {future_rf_pred[0]:.2f}")
 
-        if not stock_financial_data.empty:
-            # Display the latest income statement
-            latest_income_statement = stock_financial_data[stock_financial_data['Date'] == 'Jun 2024'].iloc[-1]
-            st.subheader(f"Latest Financial Data for {stock_name}")
-            st.write("**Income Statement (Jun 2024):**")
-            st.write(latest_income_statement)
+        # Stock Selection and Correlation Analysis
+        st.sidebar.subheader('Stock Selection')
+        stock_name = st.sidebar.selectbox('Select Stock for Financial Data', list(financial_data.keys()), index=0)
 
-            # Predict Income Statement Results
-            st.subheader(f"Predicted Income Statement Results for {stock_name}")
-            predicted_income_statement = latest_income_statement.copy()
+        if stock_name:
+            stock_financial_data = financial_data[stock_name].get('IncomeStatement', pd.DataFrame())
+            
+            if not stock_financial_data.empty:
+                latest_income_statement = stock_financial_data[stock_financial_data['Date'] == 'Jun 2024'].iloc[-1]
+                st.subheader(f"Latest Financial Data for {stock_name}")
+                st.write("**Income Statement (Jun 2024):**")
+                st.write(latest_income_statement)
 
-            for column in latest_income_statement.index:
-                if column != 'Date':
-                    predicted_income_statement[column] = latest_income_statement[column] * future_reg_pred[0] / y.mean()
+                # Predicted Income Statement Results
+                st.subheader(f"Predicted Income Statement Results for {stock_name}")
+                predicted_income_statement = latest_income_statement.copy()
 
-            # Display predicted results
-            st.write(predicted_income_statement)
+                for column in latest_income_statement.index:
+                    if column != 'Date':
+                        predicted_income_statement[column] = latest_income_statement[column] * future_reg_pred[0] / y.mean()
 
-            # Correlation Analysis and Prediction
-            st.subheader(f"Correlation Analysis for {stock_name}")
-            if stock_name in correlation_results['Stock Name'].values:
-                stock_corr_data = correlation_results[correlation_results['Stock Name'] == stock_name]
-                st.write(stock_corr_data)
-
-                # Adjust correlation based on predicted industry value
-                industry_mean = y.mean()
-                for col in stock_corr_data.columns:
-                    if 'correlation' in col:
-                        stock_corr_data[f'Adjusted {col}'] = stock_corr_data[col] * (future_reg_pred[0] / industry_mean)
-
-                st.write('**Adjusted Correlation Results:**')
-                st.write(stock_corr_data)
-
-                # Visualization of actual and predicted correlation results
-                fig_corr = go.Figure()
-
-                actual_corr_cols = [col for col in stock_corr_data.columns if 'correlation' in col]
-                predicted_corr_cols = [f'Adjusted {col}' for col in actual_corr_cols]
-
-                for col in actual_corr_cols:
-                    fig_corr.add_trace(go.Bar(x=stock_corr_data['Stock Name'], y=stock_corr_data[col], name=f'Actual {col}', marker_color='blue'))
-
-                for col in predicted_corr_cols:
-                    fig_corr.add_trace(go.Bar(x=stock_corr_data['Stock Name'], y=stock_corr_data[col], name=f'Predicted {col}', marker_color='orange'))
-
-                fig_corr.update_layout(
-                    title='Comparison of Actual and Predicted Correlation Results',
-                    xaxis_title='Stock',
-                    yaxis_title='Correlation Value',
-                    barmode='group',
-                    hovermode='x unified'
-                )
-
-                st.plotly_chart(fig_corr, use_container_width=True)
-
+                # Display predicted results
+                st.write(predicted_income_statement)
